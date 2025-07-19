@@ -1,25 +1,26 @@
-# DQN for Chinese Chess
+# Chinese Chess DQN
 
-This project implements a Deep Q-Network (DQN) agent to play a complete version of Chinese Chess using PyTorch. The environment includes all standard pieces and rules (capture, knight leg block, elephant eye block, check, checkmate). It features a Pygame interface for visualization and mouse-based move selection, with options to choose the computer's side (red or black) and difficulty level (easy, medium, hard).
+This repository contains an implementation of a Deep Q-Network (DQN) agent to play Chinese Chess (Xiangqi) against a human opponent. The agent is trained using reinforcement learning to make strategic moves, with a graphical interface provided via Pygame for visualization.
 
-## Project Structure
+## Overview
 
-- `main.py`: Main training and testing loop, handles command-line arguments and reward visualization.
-- `dqn.py`: DQN agent class, manages Q-network, target network, and updates.
-- `environment.py`: Complete Chinese Chess environment with Pygame rendering and mouse interaction.
-- `models.py`: Defines the enhanced Q-network architecture.
-- `replay_buffer.py`: Implements the experience replay buffer.
-- `utils.py`: Utility functions, including epsilon-greedy action selection.
-- `README.md`: This file.
+- **Language**: Python
+- **Libraries**: NumPy, PyTorch, Pygame, Matplotlib
+- **Purpose**: Develop an AI to play Chinese Chess, with adjustable difficulty levels (easy, medium, hard).
+- **Features**:
+  - Trainable DQN agent with experience replay.
+  - Pygame-based GUI for rendering the chessboard.
+  - Logging system to track training progress and errors.
+  - Visualization of training curves (reward, loss, invalid actions).
 
-## Dependencies
+## Prerequisites
 
-- Python 3.8+
-- PyTorch (>=1.9)
-- NumPy (>=1.21.0)
-- Matplotlib (for reward visualization)
-- Pygame (for chessboard rendering and mouse interaction)
-
-Install dependencies:
-```bash
-pip install torch numpy matplotlib pygame
+- Python 3.8 or higher
+- Required packages:
+  - `numpy`
+  - `torch`
+  - `pygame`
+  - `matplotlib`
+- Install dependencies using:
+  ```bash
+  pip install numpy torch pygame matplotlib
