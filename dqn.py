@@ -9,14 +9,18 @@ logging.basicConfig(filename='training.log', level=logging.WARNING,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
 def log_info(message):
     logger.info(message)
+
 
 def log_warning(message):
     logger.warning(message)
 
+
 def log_error(message):
     logger.error(message)
+
 
 class DQN(nn.Module):
     def __init__(self, state_dim, action_dim, batch_size=32, gamma=0.99, learning_rate=0.001, memory_size=10000,
@@ -51,8 +55,10 @@ class DQN(nn.Module):
             nn.Linear(64, action_dim)
         ).to(self.device)
 
-    def select_action(self, state, epsilon, env):
-        legal_moves = env.get_legal_moves()
+    def select_action(self, state, legal_moves, epsilon=0.1):
+        """
+        Select an action using epsilon-greedy policy
+        """
         if not legal_moves:
             log_warning("No legal moves available, returning None")
             return None
@@ -63,21 +69,36 @@ class DQN(nn.Module):
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             q_values = self.q_network(state_tensor).squeeze(0).cpu().numpy()
-            if len(legal_moves) > len(q_values):
-                q_values = np.pad(q_values, (0, len(legal_moves) - len(q_values)), mode='constant',
-                                  constant_values=np.min(q_values))
-            valid_q_values = [q_values[i] for i in range(len(legal_moves))]
+
+            # Handle case where q_values is empty
+            if len(q_values) == 0:
+                log_warning("Empty Q-values array, selecting random move")
+                return legal_moves[np.random.randint(len(legal_moves))]
+
+            # Create a mapping from action indices to legal moves
+            valid_q_values = np.zeros(len(legal_moves))
+            for i, move in enumerate(legal_moves):
+                # Use a simple hash to map moves to Q-value indices
+                move_hash = hash(move) % len(q_values)
+                valid_q_values[i] = q_values[move_hash]
+
             best_action_idx = np.argmax(valid_q_values)
             return legal_moves[best_action_idx]
 
-    def store_transition(self, state, action, reward, next_state, done, env):
+    def store_transition(self, state, action, reward, next_state, done):
+        """
+        Simplified to not require env parameter
+        """
         transition = (state, action, reward, next_state, done)
         self.memory.append(transition)
         if len(self.memory) > self.memory_size:
             self.memory.pop(0)
         log_info(f"Stored transition: Action={action}, Reward={reward}, Memory size={len(self.memory)}")
 
-    def update(self, env):
+    def update(self):
+        """
+        Simplified to not require env parameter
+        """
         self.steps_done += 1
         if len(self.memory) < self.batch_size:
             log_warning(f"Not enough samples for update, memory size={len(self.memory)}")
@@ -91,38 +112,18 @@ class DQN(nn.Module):
         rewards = torch.FloatTensor(rewards).to(self.device)
         dones = torch.FloatTensor(dones).to(self.device)
 
-        legal_moves = env.get_legal_moves()
-        if not legal_moves:
-            log_warning("No legal moves during update")
-            return
+        # Convert actions to indices (assuming actions are already indices)
+        actions = torch.LongTensor(actions).to(self.device)
 
-        action_indices = []
-        for action in actions:
-            try:
-                idx = legal_moves.index(action)
-            except ValueError:
-                idx = np.random.randint(len(legal_moves))
-                log_warning(f"Invalid action {action}, assigned random index {idx}")
-            action_indices.append(idx)
-        actions = torch.LongTensor(action_indices).to(self.device)
-
-        q_values = self.q_network(states)
-        if q_values.size(1) < actions.max() + 1:
-            pad_size = actions.max() + 1 - q_values.size(1)
-            q_values = torch.cat([q_values, torch.full((q_values.size(0), pad_size), float('-inf')).to(self.device)], dim=1)
-
-        q_values = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
+        current_q = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
 
         with torch.no_grad():
-            next_q_values = self.target_network(next_states)
-            if next_q_values.size(1) == 0:
-                log_warning("next_q_values is empty, skipping update")
-                return
-            max_next_q = next_q_values.max(1)[0]
-            targets = rewards + self.gamma * max_next_q * (1 - dones)
+            next_q = self.target_network(next_states).max(1)[0]
+            target_q = rewards + self.gamma * next_q * (1 - dones)
 
-        loss = self.criterion(q_values, targets)
+        loss = self.criterion(current_q, target_q)
         self.losses.append(loss.item())
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
