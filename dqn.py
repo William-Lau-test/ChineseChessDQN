@@ -23,7 +23,8 @@ def log_error(message):
 
 
 class DQN(nn.Module):
-    def __init__(self, state_dim, action_dim, batch_size=32, gamma=0.99, learning_rate=0.001, memory_size=10000):
+    def __init__(self, state_dim, action_dim, batch_size=32, gamma=0.99, learning_rate=0.001, memory_size=10000,
+                 target_update_freq=100):
         super(DQN, self).__init__()
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -31,106 +32,116 @@ class DQN(nn.Module):
         self.gamma = gamma
         self.learning_rate = learning_rate
         self.memory_size = memory_size
+        self.target_update_freq = target_update_freq
         self.memory = []
         self.losses = []
+        self.steps_done = 0
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # 神经网络结构
-        self.q_network = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, action_dim)
-        ).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-        self.target_network = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, action_dim)
-        ).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        self.q_network = self._build_network(action_dim)
+        self.target_network = self._build_network(action_dim)
         self.target_network.load_state_dict(self.q_network.state_dict())
         self.target_network.eval()
 
         self.optimizer = optim.Adam(self.q_network.parameters(), lr=learning_rate)
         self.criterion = nn.MSELoss()
 
-    def select_action(self, state, epsilon, env):
+    def _build_network(self, action_dim):
+        return nn.Sequential(
+            nn.Linear(self.state_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, action_dim)
+        ).to(self.device)
+
+    def select_action(self, state, legal_moves, epsilon=0.1):
+        """
+        Select an action using epsilon-greedy policy
+        """
+        if not legal_moves:
+            log_warning("No legal moves available, returning None")
+            return None
+
         if np.random.random() < epsilon:
-            legal_moves = env.get_legal_moves()
-            if not legal_moves:
-                log_warning("No legal moves available, returning None")
-                return None
             return legal_moves[np.random.randint(len(legal_moves))]
 
         with torch.no_grad():
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.q_network.device)
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             q_values = self.q_network(state_tensor).squeeze(0).cpu().numpy()
-            legal_moves = env.get_legal_moves()
-            if not legal_moves:
-                log_warning("No legal moves available during greedy selection")
-                return None
 
-            # 确保 Q 值与合法动作对应
-            valid_q_values = [q_values[i] for i, move in enumerate(env.action_space) if move in legal_moves]
-            if not valid_q_values:
-                log_warning("No valid Q values for legal moves")
+            # Handle case where q_values is empty
+            if len(q_values) == 0:
+                log_warning("Empty Q-values array, selecting random move")
                 return legal_moves[np.random.randint(len(legal_moves))]
+
+            # Create a mapping from action indices to legal moves
+            valid_q_values = np.zeros(len(legal_moves))
+            for i, move in enumerate(legal_moves):
+                # Use a simple hash to map moves to Q-value indices
+                move_hash = hash(move) % len(q_values)
+                valid_q_values[i] = q_values[move_hash]
+
             best_action_idx = np.argmax(valid_q_values)
             return legal_moves[best_action_idx]
 
-    def store_transition(self, state, action, reward, next_state, done, env):
+    def store_transition(self, state, action, reward, next_state, done):
+        """
+        Simplified to not require env parameter
+        """
         transition = (state, action, reward, next_state, done)
         self.memory.append(transition)
         if len(self.memory) > self.memory_size:
             self.memory.pop(0)
         log_info(f"Stored transition: Action={action}, Reward={reward}, Memory size={len(self.memory)}")
 
-    def update(self, env):
+    def update(self):
+        """
+        Simplified to not require env parameter
+        """
+        self.steps_done += 1
         if len(self.memory) < self.batch_size:
-            log_warning(f"Buffer is empty at step, memory size={len(self.memory)}, batch_size={self.batch_size}")
+            log_warning(f"Not enough samples for update, memory size={len(self.memory)}")
             return
 
         batch = np.random.choice(len(self.memory), self.batch_size, replace=False)
         states, actions, rewards, next_states, dones = zip(*[self.memory[idx] for idx in batch])
 
-        states = torch.FloatTensor(np.array(states)).to(self.q_network.device)
-        next_states = torch.FloatTensor(np.array(next_states)).to(self.q_network.device)
-        rewards = torch.FloatTensor(rewards).to(self.q_network.device)
-        dones = torch.FloatTensor(dones).to(self.q_network.device)
+        states = torch.FloatTensor(np.array(states)).to(self.device)
+        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
+        rewards = torch.FloatTensor(rewards).to(self.device)
+        dones = torch.FloatTensor(dones).to(self.device)
 
-        # 转换为动作索引
-        legal_moves = env.get_legal_moves()
-        action_indices = [legal_moves.index(action) if action in legal_moves else -1 for action in actions]
-        actions = torch.LongTensor([i for i in action_indices if i != -1]).to(self.q_network.device)
-        if len(actions) == 0:
-            log_warning("No valid action indices found for batch")
-            return
+        # Convert actions to indices (assuming actions are already indices)
+        actions = torch.LongTensor(actions).to(self.device)
 
-        # 计算 Q 值
-        q_values = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        current_q = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+
         with torch.no_grad():
-            next_q_values = self.target_network(next_states).max(1)[0]
-            targets = rewards + self.gamma * next_q_values * (1 - dones)
+            next_q = self.target_network(next_states).max(1)[0]
+            target_q = rewards + self.gamma * next_q * (1 - dones)
 
-        loss = self.criterion(q_values, targets)
+        loss = self.criterion(current_q, target_q)
         self.losses.append(loss.item())
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-        # 定期更新目标网络
-        if len(self.memory) % 100 == 0:
+        if self.steps_done % self.target_update_freq == 0:
             self.target_network.load_state_dict(self.q_network.state_dict())
-            log_info("Target network updated")
+            log_info(f"Target network updated at step {self.steps_done}")
 
     def save(self, path):
         torch.save(self.q_network.state_dict(), path)
         log_info(f"Model saved to {path}")
 
     def load(self, path):
-        self.q_network.load_state_dict(torch.load(path))
-        self.target_network.load_state_dict(self.q_network.state_dict())
-        self.q_network.eval()
-        self.target_network.eval()
-        log_info(f"Model loaded from {path}")
+        try:
+            self.q_network.load_state_dict(torch.load(path))
+            self.target_network.load_state_dict(self.q_network.state_dict())
+            self.q_network.eval()
+            self.target_network.eval()
+            log_info(f"Model loaded from {path}")
+        except FileNotFoundError:
+            log_warning(f"Model file not found at {path}, skipping load")
