@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import numpy as np
 import pygame
 import logging
@@ -24,13 +26,31 @@ def log_error(message):
     logger.error(message)
 
 
+def strict_dim_check(func):
+    def wrapper(env, *args, **kwargs):
+        result = func(env, *args, **kwargs)
+        if not hasattr(env, 'state_dim'):
+            return result
+
+        actual_dim = result.shape[0] if hasattr(result, 'shape') else len(result)
+        if actual_dim != env.state_dim:
+            raise ValueError(
+                f"致命维度冲突！\n"
+                f"环境声明维度: {env.state_dim}\n"
+                f"实际生成维度: {actual_dim}\n"
+                f"冲突方法: {func.__name__}"
+            )
+        return result
+
+    return wrapper
+
 class ChineseChessEnv:
     def __init__(self, computer_player=1, agent=None):
-        self.board = np.zeros((10, 9))  # 10横线与9纵线的交点 (0,0)到(9,8)
+        self.state_dim = 1530  # 原错误设置为90，必须改为1530
+        self.board = np.zeros((10, 9))
         self.current_player = 1
         self.computer_player = computer_player
         self.agent = agent
-        self.state_dim = 90  # 初始状态维度，10*9=90
         self.action_space = []
         self.pygame_initialized = False
         self.start_time = time.time()
@@ -55,6 +75,7 @@ class ChineseChessEnv:
         }
         log_info(f"Environment initialized with computer_player={computer_player}")
 
+    @strict_dim_check
     def reset(self):
         self.board = np.zeros((10, 9))
         self.start_time = time.time()
@@ -78,146 +99,181 @@ class ChineseChessEnv:
 
         self.current_player = 1
         self.action_space = self.get_legal_moves()
-        return self.get_state()
+        state = self.get_state()
+        # print(f"重置后状态维度: {len(state)}")  # 应为1530
+        return state
 
+    @strict_dim_check
     def get_state(self):
-        return self.board.flatten()
+        """返回严格1530维的状态表示"""
+        # 基础棋盘层 (1 channel)
+        state_layers = [self.board.copy()]
+
+        # 棋子类型通道 (14 channels)
+        for piece_type in [1, 2, 3, 4, 5, 6, 7]:
+            state_layers.append((self.board == piece_type).astype(float))
+            state_layers.append((self.board == -piece_type).astype(float))
+
+        # 历史信息通道 (2 channels)
+        state_layers.extend([
+            (self.board * self.current_player) > 0,  # 当前方控制
+            (self.board * self.current_player) < 0  # 对手控制
+        ])
+
+        state = np.concatenate([layer.flatten() for layer in state_layers])
+        assert len(state) == self.state_dim, "维度必须一致！"
+        return state
 
     def get_legal_moves(self):
+        """改进的合法移动检查"""
         legal_moves = []
-        must_respond_moves = []  # Moves that respond to check
+        must_respond_moves = []  # 必须应对将军的移动
 
+        # 检查是否被将军
         in_check = self.is_king_threatened(self.current_player)
-        # 修复将军显示错误
-        if in_check:
-            self.check_status = "red" if self.current_player == -1 else "black"
-        else:
-            self.check_status = None
 
         for i in range(10):
             for j in range(9):
                 piece = self.board[i, j]
-                if piece * self.current_player <= 0:
+                if piece * self.current_player <= 0:  # 不是当前玩家的棋子
                     continue
 
-                abs_piece = abs(piece)
-                moves = self._get_piece_moves(i, j, abs_piece)
+                moves = self._get_piece_moves(i, j, abs(piece))
 
                 for ni, nj in moves:
-                    # Simulate move to check validity
+                    # 模拟移动
                     temp_board = self.board.copy()
                     temp_board[ni, nj] = temp_board[i, j]
                     temp_board[i, j] = 0
 
-                    # Check if move leaves king in check or creates facing kings
-                    if not self._simulate_check(temp_board, self.current_player) and not self._check_kings_facing(
-                            temp_board):
+                    # 检查移动后是否仍被将军
+                    if not self._simulate_check(temp_board, self.current_player):
                         if in_check:
                             must_respond_moves.append((i, j, ni, nj))
                         else:
-                            if self.board[ni, nj] * self.current_player <= 0:
-                                legal_moves.append((i, j, ni, nj))
+                            legal_moves.append((i, j, ni, nj))
 
-        # If in check, only return moves that get out of check
+        # 如果被将军，只返回能解除将军的移动
         if in_check:
             return must_respond_moves if must_respond_moves else []
 
         return legal_moves if legal_moves else []
 
     def _get_piece_moves(self, i, j, piece_type):
-        """Helper function to get possible moves for a piece (without checking board state)"""
+        """严格修正后的棋子移动生成函数"""
         moves = []
+        current_player_sign = self.current_player
 
-        if piece_type == 1:  # King/General
+        def add_move(ni, nj):
+            """安全添加移动位置（自动边界检查）"""
+            if 0 <= ni < 10 and 0 <= nj < 9:
+                moves.append((ni, nj))
+
+        # 将/帅 (King)
+        if piece_type == 1:
             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 ni, nj = i + dx, j + dy
-                if 0 <= ni < 10 and 0 <= nj < 9 and 3 <= nj <= 5:
-                    if (self.current_player == 1 and 7 <= ni <= 9) or (self.current_player == -1 and 0 <= ni <= 2):
-                        moves.append((ni, nj))
+                # 红方九宫(7-9行) 黑方九宫(0-2行)
+                if ((current_player_sign == 1 and 7 <= ni <= 9) or
+                    (current_player_sign == -1 and 0 <= ni <= 2)) and \
+                        3 <= nj <= 5:  # 中线3-5列
+                    add_move(ni, nj)
 
-        elif piece_type == 2:  # Advisor
+        # 士/仕 (Advisor)
+        elif piece_type == 2:
             for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
                 ni, nj = i + dx, j + dy
-                if 0 <= ni < 10 and 0 <= nj < 9 and 3 <= nj <= 5:
-                    if (self.current_player == 1 and 7 <= ni <= 9) or (self.current_player == -1 and 0 <= ni <= 2):
-                        moves.append((ni, nj))
+                # 必须严格在九宫格内
+                if ((current_player_sign == 1 and 7 <= ni <= 9 and 3 <= nj <= 5) or
+                        (current_player_sign == -1 and 0 <= ni <= 2 and 3 <= nj <= 5)):
+                    add_move(ni, nj)
 
-        elif piece_type == 3:  # Elephant
+        # 象/相 (Elephant) - 完全重写
+        elif piece_type == 3:
             for dx, dy in [(-2, -2), (-2, 2), (2, -2), (2, 2)]:
                 ni, nj = i + dx, j + dy
-                mi, mj = i + dx // 2, j + dy // 2  # Center position
-                if (0 <= ni < 10 and 0 <= nj < 9 and
-                        0 <= mi < 10 and 0 <= mj < 9):
-                    # Check if elephant center is blocked
-                    if self.board[mi, mj] == 0:
-                        if (self.current_player == 1 and ni >= 5) or (self.current_player == -1 and ni <= 4):
-                            moves.append((ni, nj))
+                # 象眼位置(田字中心)
+                block_i, block_j = i + dx // 2, j + dy // 2
 
-        elif piece_type == 4:  # Horse
-            for dx, dy, bx, by in [
-                (-2, -1, -1, 0), (-2, 1, -1, 0),
-                (2, -1, 1, 0), (2, 1, 1, 0),
-                (-1, -2, 0, -1), (-1, 2, 0, 1),
-                (1, -2, 0, -1), (1, 2, 0, 1)
-            ]:
+                # 检查：1.不越界 2.不过河 3.象眼无子
+                if (0 <= ni < 10 and 0 <= nj < 9 and
+                        0 <= block_i < 10 and 0 <= block_j < 9 and
+                        self.board[block_i, block_j] == 0):
+
+                    # 红方不过河(5-9行) 黑方不过河(0-4行)
+                    if (current_player_sign == 1 and ni >= 5) or \
+                            (current_player_sign == -1 and ni <= 4):
+                        add_move(ni, nj)
+
+        # 马 (Horse)
+        elif piece_type == 4:
+            horse_legs = [
+                ((-2, -1), (-1, 0)), ((-2, 1), (-1, 0)),
+                ((2, -1), (1, 0)), ((2, 1), (1, 0)),
+                ((-1, -2), (0, -1)), ((-1, 2), (0, 1)),
+                ((1, -2), (0, -1)), ((1, 2), (0, 1))
+            ]
+            for (dx, dy), (bx, by) in horse_legs:
                 ni, nj = i + dx, j + dy
-                bi, bj = i + bx, j + by  # Blocking position
+                bi, bj = i + bx, j + by
                 if (0 <= ni < 10 and 0 <= nj < 9 and
-                        0 <= bi < 10 and 0 <= bj < 9):
-                    # Check if horse leg is blocked
-                    if self.board[bi, bj] == 0:
-                        moves.append((ni, nj))
+                        0 <= bi < 10 and 0 <= bj < 9 and
+                        self.board[bi, bj] == 0):  # 马腿无子
+                    add_move(ni, nj)
 
-        elif piece_type == 5:  # Rook
+        # 车 (Rook)
+        elif piece_type == 5:
             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 ni, nj = i + dx, j + dy
                 while 0 <= ni < 10 and 0 <= nj < 9:
-                    if self.board[ni, nj] == 0:
-                        moves.append((ni, nj))
+                    target = self.board[ni, nj]
+                    if target == 0:
+                        add_move(ni, nj)
                     else:
-                        if self.board[ni, nj] * self.current_player < 0:
-                            moves.append((ni, nj))
+                        if target * current_player_sign < 0:  # 可吃对方子
+                            add_move(ni, nj)
                         break
                     ni += dx
                     nj += dy
 
-        elif piece_type == 6:  # Cannon
+        # 炮 (Cannon)
+        elif piece_type == 6:
             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 ni, nj = i + dx, j + dy
-                jumped = False
+                has_jumped = False
                 while 0 <= ni < 10 and 0 <= nj < 9:
-                    if not jumped:
-                        if self.board[ni, nj] == 0:
-                            moves.append((ni, nj))
+                    target = self.board[ni, nj]
+                    if not has_jumped:
+                        if target == 0:
+                            add_move(ni, nj)
                         else:
-                            jumped = True
+                            has_jumped = True
                     else:
-                        if self.board[ni, nj] != 0:
-                            if self.board[ni, nj] * self.current_player < 0:
-                                moves.append((ni, nj))
+                        if target != 0:
+                            if target * current_player_sign < 0:  # 可吃对方子
+                                add_move(ni, nj)
                             break
                     ni += dx
                     nj += dy
 
-        elif piece_type == 7:  # Pawn
-            if self.current_player == 1:  # Red
-                if i > 0:  # Can move forward
-                    moves.append((i - 1, j))
-                if i <= 4:  # Crossed river - can move sideways
-                    if j > 0:
-                        moves.append((i, j - 1))
-                    if j < 8:
-                        moves.append((i, j + 1))
-            else:  # Black
-                if i < 9:  # Can move forward
-                    moves.append((i + 1, j))
-                if i >= 5:  # Crossed river - can move sideways
-                    if j > 0:
-                        moves.append((i, j - 1))
-                    if j < 8:
-                        moves.append((i, j + 1))
+        # 兵/卒 (Pawn)
+        elif piece_type == 7:
+            if current_player_sign == 1:  # 红兵
+                if i > 0:  # 可前进
+                    add_move(i - 1, j)
+                if i <= 4:  # 已过河(0-4行)
+                    if j > 0: add_move(i, j - 1)  # 左移
+                    if j < 8: add_move(i, j + 1)  # 右移
+            else:  # 黑卒
+                if i < 9:  # 可前进
+                    add_move(i + 1, j)
+                if i >= 5:  # 已过河(5-9行)
+                    if j > 0: add_move(i, j - 1)
+                    if j < 8: add_move(i, j + 1)
 
-        return moves
+        # 最终过滤：排除吃己方棋子的移动
+        return [(ni, nj) for (ni, nj) in moves
+                if self.board[ni, nj] * current_player_sign <= 0]
 
     def _simulate_check(self, board, player):
         # Get king position
@@ -248,14 +304,17 @@ class ChineseChessEnv:
                     elif piece == 4:  # Horse
                         if self._check_horse_attack(board, i, j, king_pos[0], king_pos[1], opponent):
                             return True
-                    elif piece == 1:  # King (facing kings)
+                    elif piece == 1:  # King (facing kings)F
                         if j == king_pos[1]:  # Same file
                             if self._check_kings_facing(board):
                                 return True
-                    # Other pieces can't directly check the king
+                    elif piece == 7:
+                        if self._check_pawn_attack( i, j, king_pos[0], king_pos[1], opponent):
+                            return True
         return False
 
-    def _check_rook_attack(self, board, i, j, ki, kj, opponent):
+    @staticmethod
+    def _check_rook_attack(board, i, j, ki, kj, opponent):
         """Check if rook at (i,j) can attack king at (极,kj)"""
         if i == ki:  # Same row
             step = 1 if kj > j else -1
@@ -336,60 +395,148 @@ class ChineseChessEnv:
             return True
         return False
 
+    def _check_pawn_attack(self,pi, pj, ki, kj, opponent):
+        """
+        兵卒将军检测
+        参数:
+            pi,pj: 兵卒位置
+            ki,kj: 将/帅位置
+            opponent: 当前对手（兵卒方）
+        """
+        # 兵卒只能近距离将军（相邻四方向）
+        if abs(pi - ki) + abs(pj - kj) != 1:
+            return False
+
+        # 红兵(7)只能向下攻击（数值越小越靠近黑方）
+        if opponent == -1:  # 红兵攻击黑将
+            return ki >= pi  # 将的位置在兵的下方
+
+        # 黑卒(-7)只能向上攻击（数值越大越靠近红方）
+        else:  # 黑卒攻击红帅
+            return ki <= pi  # 帅的位置在卒的上方
+
     def step(self, action):
+        """
+        修复版step函数，确保：
+        1. 正确记录吃子信息
+        2. 更新将军状态
+        3. 保持原有核心功能
+        """
+        # ===== 1. 初始状态验证 =====
+        if not self._is_validate_board():
+            return self.get_state(), -1.0, True, {"error": "invalid_board"}
+
+        # ===== 2. 获取合法移动 =====
         legal_moves = self.get_legal_moves()
+
+        # ===== 3. 终局判定 =====
+        # 情况1: 无合法移动
         if not legal_moves:
-            if self.is_king_threatened(self.current_player):
-                reward = -100 if self.current_player == self.computer_player else 100
+            if self._simulate_check(self.board, self.current_player):
+                # 被将死
+                reward = -1.0 if self.current_player == self.computer_player else 1.0
                 return self.get_state(), reward, True, "checkmate"
-            return self.get_state(), -0.1, True, "stalemate"
+            else:
+                # 困毙（当前玩家负）
+                reward = -1.0 if self.current_player == self.computer_player else 1.0
+                return self.get_state(), reward, True, "stalemate"
 
+        # 情况2: 80回合未吃子（和棋）
+        if self.move_count_since_capture >= 80:
+            return self.get_state(), 0.0, True, "draw_80_moves"
+
+        # ===== 4. 动作验证 =====
         if action not in legal_moves:
-            log_error(f"Invalid action {action} not in valid moves: {legal_moves[:5]}...")
-            return self.get_state(), -1.0, False, "invalid"
+            return self.get_state(), -0.1, False, {"error": "invalid_move"}
 
+        # ===== 5. 执行移动 =====
         i, j, ni, nj = action
-        captured = self.board[ni, nj]
-        self.board[ni, nj] = self.board[i, j]
+        moving_piece = self.board[i, j]
+        captured_piece = self.board[ni, nj]
+
+        # 保存旧状态用于回滚
+        old_board = self.board.copy()
+        old_player = self.current_player
+
+        # 执行移动
+        self.board[ni, nj] = moving_piece
         self.board[i, j] = 0
 
-        # Update move count since last capture
-        if captured != 0:
+        # +++ 新增：记录吃子 +++
+        if captured_piece != 0:
+            piece_name = self.piece_values.get(abs(captured_piece), '?')
+            if old_player == 1:  # 红方吃子
+                self.captured_pieces['red'].append(piece_name)
+            else:  # 黑方吃子
+                self.captured_pieces['black'].append(piece_name)
             self.move_count_since_capture = 0
         else:
             self.move_count_since_capture += 1
+        # --- 新增结束 ---
 
-        # Record captured pieces
-        if captured * self.current_player < 0:
-            side = 'red' if self.current_player == 1 else 'black'
-            piece_name = self.piece_values.get(abs(captured), '?')
-            self.captured_pieces[side].append(piece_name)
+        # ===== 6. 移动后验证 =====
+        # 检查移动后是否自将
+        if self._simulate_check(self.board, old_player):
+            self.board = old_board  # 回滚
+            return self.get_state(), -0.5, False, {"error": "self_check"}
 
-        reward = -0.01
-        done = False
-        status = "continue"
+        # 检查将帅对面
+        if self._check_kings_facing(self.board):
+            self.board = old_board
+            return self.get_state(), 0.0, True, "draw_kings_facing"
 
-        # Check for draw by 80-move rule
-        if self.move_count_since_capture >= 80:
-            return self.get_state(), 0, True, "draw_80_moves"
-
-        if captured * self.current_player < 0:
-            captured_name = self.piece_values.get(abs(captured), '')
-            reward += self.piece_strategic_values.get(captured_name, 0) / 100
-
-        if abs(captured) == 1:  # Captured king
-            reward = 100 if self.current_player == self.computer_player else -100
-            done = True
-            status = "checkmate"
-
-        # Check if opponent is in check after move
+        # +++ 新增：更新将军状态 +++
+        self.check_status = None
         if self.is_king_threatened(-self.current_player):
-            reward += 0.5 if self.current_player == self.computer_player else -0.5
-            status = "check"
+            self.check_status = "red" if self.current_player == -1 else "black"
+        # --- 新增结束 ---
 
-        reward = np.clip(reward, -100, 100)
+        # ===== 7. 切换玩家 =====
         self.current_player *= -1
-        return self.get_state(), reward, done, status
+
+        # ===== 8. 简化奖励计算 =====
+        reward = self._calculate_reward(moving_piece, captured_piece)
+
+        return self.get_state(), reward, False, {
+            "move": action,
+            "captured": captured_piece if captured_piece != 0 else None,
+            "check": self.check_status
+        }
+
+    def _calculate_reward(self, moving_piece, captured):
+        """
+        简化版奖励计算：
+        1. 仅保留吃子奖励
+        2. 移除所有需要prev_board的计算
+        """
+        reward = 0.0
+
+        # 1. 吃子奖励（基于棋子价值）
+        if captured != 0:
+            piece_type = self.piece_values[abs(captured)]
+            value = self.piece_strategic_values[piece_type]
+            reward += np.tanh(value * 0.01)  # 压缩到(-1,1)
+
+        # 2. 将军奖励（不需要历史状态）
+        if self.is_king_threatened(-self.current_player):
+            reward += 0.05 if self.current_player == self.computer_player else -0.05
+
+        return np.clip(reward, -1.0, 1.0)
+
+    def _evaluate_board(self, board):
+        """
+        保留局面评估函数（其他功能可能使用）
+        但不再用于奖励计算
+        """
+        return np.sum([
+            self.piece_strategic_values[self.piece_values[abs(p)]]
+            for p in board.flatten() if p != 0
+        ])
+
+    def _undo_move(self, i, j, ni, nj, captured):
+        """回滚移动"""
+        self.board[i, j] = self.board[ni, nj]
+        self.board[ni, nj] = captured
 
     def is_king_threatened(self, player):
         return self._simulate_check(self.board, player)
@@ -454,48 +601,56 @@ class ChineseChessEnv:
         timer_surface = font.render(timer_text, True, (0, 0, 0))
         self.screen.blit(timer_surface, (20, 100))
 
-        # Check status - 修复将军显示错误
+        # +++ 修复：将军状态显示 +++
         if self.check_status:
             if self.check_status == "red":
-                check_text = "黑方被将军!"
+                check_text = "红方被将军!"
                 check_color = (200, 0, 0)
             else:
-                check_text = "红方被将军!"
+                check_text = "黑方被将军!"
                 check_color = (0, 0, 0)
             check_surface = font.render(check_text, True, check_color)
             self.screen.blit(check_surface, (20, 140))
+        # --- 修复结束 ---
 
-        # Captured pieces - improved layout
-        self._draw_captured_pieces(20, 180 if self.check_status else 140)
+        # +++ 修复：吃子列表显示位置 +++
+        y_start = 180 if self.check_status else 140
+        self._draw_captured_pieces(20, y_start)
 
         # Move count
         move_text = f"回合: {self.move_count_since_capture}/80"
         move_surface = font.render(move_text, True, (0, 0, 0))
-        self.screen.blit(move_surface, (20, 800))  # Positioned at bottom left
+        self.screen.blit(move_surface, (20, 800))
 
     def _draw_captured_pieces(self, x, y):
         """Draw the captured pieces lists with improved layout"""
         font = pygame.font.SysFont('SimHei', 24)
 
-        # Red captured pieces (by black)
-        text = font.render("黑方吃子:", True, (0, 0, 0))
+        # 红方吃子（黑方棋子）
+        text = font.render("红方吃子:", True, (200, 0, 0))  # 红色标题
         self.screen.blit(text, (x, y))
 
         piece_font = pygame.font.SysFont('SimHei', 20)
-        captured_black = self.captured_pieces['black'][-10:]  # Show last 10
-        for i, piece in enumerate(captured_black):
-            text = piece_font.render(piece, True, (200, 0, 0))
-            self.screen.blit(text, (x + 20 + (i % 3) * 50, y + 30 + (i // 3) * 25))  # 3 columns
+        captured_red = self.captured_pieces['red'][-10:]  # 显示最后10个
 
-        # Black captured pieces (by red)
-        y += 30 + ((len(captured_black) + 2) // 3) * 25  # Dynamic spacing based on items
-        text = font.render("红方吃子:", True, (0, 0, 0))
+        # 计算行数
+        rows = (len(captured_red) + 2) // 3
+
+        for i, piece in enumerate(captured_red):
+            text = piece_font.render(piece, True, (0, 0, 0))  # 黑色棋子
+            self.screen.blit(text, (x + 20 + (i % 3) * 50, y + 30 + (i // 3) * 25))
+
+        # 黑方吃子（红方棋子）
+        y += 30 + rows * 25  # 动态间距
+        text = font.render("黑方吃子:", True, (0, 0, 0))  # 黑色标题
         self.screen.blit(text, (x, y))
 
-        captured_red = self.captured_pieces['red'][-10:]
-        for i, piece in enumerate(captured_red):
-            text = piece_font.render(piece, True, (0, 0, 0))
-            self.screen.blit(text, (x + 20 + (i % 3) * 50, y + 30 + (i // 3) * 25))  # 3 columns
+        captured_black = self.captured_pieces['black'][-10:]
+        rows = (len(captured_black) + 2) // 3
+
+        for i, piece in enumerate(captured_black):
+            text = piece_font.render(piece, True, (200, 0, 0))  # 红色棋子
+            self.screen.blit(text, (x + 20 + (i % 3) * 50, y + 30 + (i // 3) * 25))
 
     def _draw_chess_board(self, x_offset):
         """Draw the chess board at the given x offset"""
@@ -670,3 +825,43 @@ class ChineseChessEnv:
                 pygame.draw.circle(self.screen, (100, 255, 100), (x, y), 15)
             else:
                 pygame.draw.circle(self.screen, (255, 100, 100), (x, y), 20)
+
+    def _is_validate_board(self):
+        """修正版棋盘验证（解决将帅位置颠倒问题）"""
+        # 1. 将帅存在性检查
+        red_kings = np.sum(self.board == 1)  # 红帅
+        black_kings = np.sum(self.board == -1)  # 黑将
+
+        if red_kings != 1 or black_kings != 1:
+            print(f"将帅数量异常：红帅={red_kings} 黑将={black_kings}")
+            self._log_board_state()
+            return False
+
+        # 2. 获取真实位置（注意红方在棋盘下方）
+        try:
+            red_pos = np.argwhere(self.board == 1)[0]  # 红帅位置（应7-9行）
+            black_pos = np.argwhere(self.board == -1)[0]  # 黑将位置（应0-2行）
+        except IndexError:
+            print("将帅位置获取失败")
+            return False
+
+        # 3. 正确的位置验证（根据实际棋盘布局）
+        # 红帅应在下方九宫格（7-9行，3-5列）
+        red_valid = (7 <= red_pos[0] <= 9) and (3 <= red_pos[1] <= 5)
+        # 黑将应在上方九宫格（0-2行，3-5列）
+        black_valid = (0 <= black_pos[0] <= 2) and (3 <= black_pos[1] <= 5)
+
+        if not red_valid:
+            print(f"红帅位置非法：row={red_pos[0]} col={red_pos[1]}")
+        if not black_valid:
+            print(f"黑将位置非法：row={black_pos[0]} col={black_pos[1]}")
+
+        return red_valid and black_valid
+
+    def _log_board_state(self):
+        """记录错误棋盘状态"""
+        with open("errors/board_errors.log", "a") as f:
+            f.write(f"\n异常时间：{datetime.now()}\n")
+            f.write("当前棋盘：\n")
+            f.write(str(self.board) + "\n")
+            f.write(f"当前玩家：{'红方' if self.current_player == 1 else '黑方'}\n")
