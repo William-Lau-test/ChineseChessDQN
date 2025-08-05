@@ -92,11 +92,6 @@ pytest test/
 - Action space is encoded into a linear index for (i, j, ni, nj) mapping.
 - AMP is enabled if CUDA is available.
 
----
-
-## 📜 License
-
-MIT License
 
 ---
 
