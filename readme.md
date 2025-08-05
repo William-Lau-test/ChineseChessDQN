@@ -1,148 +1,105 @@
 # Chinese Chess DQN Agent
 
-This project implements a robust Deep Q-Network (DQN) agent to play Chinese Chess (Xiangqi), trained through reinforcement learning and equipped with safety-aware action selection, dynamic difficulty adaptation, and Pygame visualization. The codebase emphasizes training stability, action legality, and structured environment design.
+This project implements a Deep Q-Network (DQN) agent to play Chinese Chess (Xiangqi), using reinforcement learning in a custom environment with strict rule enforcement. It supports mixed-precision training, structured debugging, and detailed unit testing.
 
-> **Current active branch**: `feature/modifyTrain`  
-> Status: ✅ Mixed-precision training, ✅ Legal move masking, ✅ Improved environment interface
+> **Active Branch**: `feature/modifyTrain`
 
 ---
 
 ## 🧠 Key Features
 
-- **Safe DQN Training Pipeline**: With epsilon-greedy strategy adapted by difficulty, constrained action selection, and gradient clipping.
-- **Custom Environment**:
-  - 1530-dimensional state vector combining board layers and control maps.
-  - Full legality check for moves, including "king face-to-face" and self-check.
-  - Reward shaping includes capturing value and check status.
-- **Advanced Architecture**:
-  - Dual Q-Networks (online + target) with `LayerNorm` and mixed precision (AMP).
-  - Action space encoded as linear indices over all possible (from, to) positions.
-- **Logging & Debugging**:
-  - Logging via Python `logging` module with saved `.log` files.
-  - Dimension mismatch checks and error recovery mechanisms.
-- **Interactive GUI**:
-  - Built with Pygame, supports piece selection, move highlights, and in-game status panels.
-
----
-
-## 🔧 Installation
-
-```bash
-git clone https://github.com/your-username/ChineseChessDQN.git
-cd ChineseChessDQN
-pip install -r requirements.txt
-```
-
-If no `requirements.txt`, manually install:
-
-```bash
-pip install torch pygame numpy matplotlib
-```
-
----
-
-## 🚀 How to Train
-
-Run the following in terminal:
-
-```bash
-python main.py
-```
-
-This launches training using the current settings:
-- Batch size: 64
-- Optimizer: AdamW
-- Mixed Precision: Enabled (if CUDA available)
-- Target update frequency: 5000 steps
-
-All hyperparameters are defined in `dqn.py` and configurable via agent initialization.
-
----
-
-## 🧪 Environment (Custom)
-
-Defined in [`environment.py`](./environment.py), the `ChineseChessEnv` class includes:
-- `get_state()`: Returns a 1530-dim vector with multiple spatial channels
-- `get_legal_moves()`: Strict legal move generator considering check and blocking rules
-- `step(action)`: Applies move and returns `(next_state, reward, done, info)`
-
-Board state includes 1 layer of raw board positions, 14 binary piece layers, and 2 control layers (friendly/enemy control zones).
-
----
-
-## 🏗️ DQN Agent Design
-
-Located in [`dqn.py`](./dqn.py), the `DQNAgent` includes:
-
-- `select_action(state, legal_moves)`: Epsilon-greedy with legal move filtering.
-- `store_transition()`: Records (s, a, r, s', done) with validation.
-- `update()`: Mixed-precision backward pass, loss clipping, target updates.
-- `save(path) / load(path)`: Checkpointing support.
-
----
-
-## 🧩 Action Representation
-
-Moves are encoded as `(i, j, ni, nj)` tuples and mapped to a linear index:
-
-```
-index = (i * 9 + j) * 90 + (ni * 9 + nj)
-```
-
-This enables consistent indexing across state and Q-value vectors.
-
----
-
-## 🎮 GUI Instructions
-
-- On launch, the GUI will render the chessboard.
-- Click to select a piece and see legal moves.
-- The agent plays automatically as the opposite side.
-- Captured pieces, game state (check/checkmate), and timers are displayed.
-
----
-
-## 📈 Visualization (Optional)
-
-To visualize training progress (e.g., average reward, loss):
-
-```bash
-python visualize.py
-```
-
-Ensure logs or saved metrics are available for plotting.
+- **Safe DQN Training Pipeline**: Includes epsilon-greedy with difficulty levels, constrained legal actions, and stable loss handling.
+- **Custom Game Environment**:
+  - Full Chinese Chess rules with move legality, check detection, and self-check prevention.
+  - 1530-dimensional state representation combining board layers and control zones.
+- **Agent Architecture**:
+  - DQN with dual networks (online/target), `LayerNorm`, AMP support.
+  - Legal move masking using move-index encoding.
+- **Debug & Recovery**:
+  - Logging system with strict dimension checks and error rollbacks.
+  - Auto-handling of invalid board states or illegal moves.
+- **Unit Testing Support**:
+  - Organized under `/test` for model, environment, and dimension tests.
 
 ---
 
 ## 📁 Project Structure
 
 ```
-├── main.py               # Entry point (train loop)
-├── dqn.py                # DQN agent
-├── environment.py        # Custom chess environment
-├── visualize.py          # Optional training curve visualization
-├── training.log          # Log file (auto-generated)
-├── models/               # (Optional) Saved checkpoints
+├── dqn.py                # DQN agent implementation
+├── environment.py        # Chinese Chess environment
+├── train.py              # Main training loop
+├── evaluate.py           # Model evaluation script
+├── battle.py             # Agent vs agent/human interface
+├── cmd.txt               # Example commands
+├── main.py               # (Entry wrapper, customizable)
+├── test/                 # Pytest-compatible unit tests
+│   ├── fix_dimension_test.py
+│   ├── test_dqn.py
+│   ├── test_environment.py
+│   ├── test_dimensions.py
+│   ├── test_train.py
+│   └── test_verify_state.py
+├── utils/                # Helper modules
+│   ├── memory.py         # Experience replay memory
+│   ├── scheduler.py      # Learning rate or epsilon scheduler
+│   └── __init__.py
 └── README.md
+```
+
+---
+
+## 🔧 Installation
+
+```bash
+pip install torch pygame numpy
+```
+
+---
+
+## 🚀 Training
+
+```bash
+python train.py
+```
+
+Training parameters can be configured in `train.py` or through modifying the `DQNAgent` class in `dqn.py`.
+
+---
+
+## 🤖 Evaluation & Battle
+
+```bash
+python evaluate.py       # Runs evaluation
+python battle.py         # Launches GUI game (human vs AI)
+```
+
+---
+
+## 🧪 Testing
+
+Unit tests are located in the `test/` directory. To run all tests:
+
+```bash
+pytest test/
 ```
 
 ---
 
 ## 📌 Notes
 
-- The environment assumes red plays at bottom, black at top.
-- The current player switches after each valid move.
-- Auto-resets if the board becomes invalid (e.g., king missing).
+- The environment enforces all Chinese Chess rules including king facing rule and 80-move draw rule.
+- Action space is encoded into a linear index for (i, j, ni, nj) mapping.
+- AMP is enabled if CUDA is available.
 
 ---
 
 ## 📜 License
 
-MIT License. Feel free to fork, modify, and contribute!
+MIT License
 
 ---
 
 ## 🤝 Acknowledgements
 
-- Inspired by classic DQN and AlphaZero-style agents.
-- Thanks to the Chinese Chess open-source rule databases and visualization tools.
+Thanks to open-source contributions in reinforcement learning and Chinese Chess rule references.
